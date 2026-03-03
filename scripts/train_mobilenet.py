@@ -11,9 +11,12 @@ from tqdm import tqdm
 
 from hand_object_demo.training import (
     build_dataloaders,
+    build_scheduler,
     create_model,
+    freeze_backbone,
     run_epoch,
     save_checkpoint,
+    unfreeze_backbone,
     write_history_csv,
     write_json,
 )
@@ -26,13 +29,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default="mobilenet_v3_small", choices=["mobilenet_v3_small", "mobilenet_v3_large"])
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--freeze-epochs", type=int, default=3, help="Freeze backbone for the first N epochs (fine-tune head only).")
+    parser.add_argument("--label-smoothing", type=float, default=0.1, help="Label smoothing factor for CrossEntropyLoss.")
+    parser.add_argument("--warmup-epochs", type=int, default=3, help="Linear warmup epochs for LR scheduler.")
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--pretrained", action="store_true", default=False, help="Use ImageNet-pretrained weights.")
+    parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True, help="Use ImageNet-pretrained weights (default: True). Use --no-pretrained to train from scratch.")
     return parser.parse_args()
 
 
@@ -56,16 +62,29 @@ def main() -> None:
     model = create_model(args.model, num_classes=num_classes, pretrained=args.pretrained)
     model.to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    # Freeze backbone for the first N epochs so only the head trains
+    if args.freeze_epochs > 0 and args.pretrained:
+        freeze_backbone(model)
+
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = build_scheduler(optimizer, epochs=args.epochs, warmup_epochs=args.warmup_epochs)
 
     history = []
     best_val_acc = -1.0
     best_payload = None
 
     for epoch in range(1, args.epochs + 1):
+        # Unfreeze backbone after freeze period
+        if epoch == args.freeze_epochs + 1 and args.freeze_epochs > 0 and args.pretrained:
+            unfreeze_backbone(model)
+            # Rebuild optimizer so all params get proper LR
+            optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+            scheduler = build_scheduler(optimizer, epochs=args.epochs - args.freeze_epochs, warmup_epochs=min(args.warmup_epochs, args.epochs - args.freeze_epochs))
+
         train_loss, train_acc = run_epoch(model, loaders["train"], criterion, optimizer, device, train=True)
         val_loss, val_acc = run_epoch(model, loaders["val"], criterion, optimizer, device, train=False)
+        scheduler.step()
 
         row = {
             "epoch": epoch,

@@ -34,20 +34,19 @@ class CSVCropDataset(Dataset):
 def build_transforms(image_size: int = 224) -> tuple[transforms.Compose, transforms.Compose]:
     train_tfms = transforms.Compose(
         [
-            # Geometry — aggressive rotations, flips, perspective
-            transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0)),
+            # Geometry — mild, realistic distortions only
+            transforms.RandomResizedCrop(image_size, scale=(0.7, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomVerticalFlip(p=0.3),
-            transforms.RandomRotation(degrees=180),
-            transforms.RandomAffine(degrees=0, translate=(0.15, 0.15), shear=20),
-            transforms.RandomPerspective(distortion_scale=0.3, p=0.4),
+            transforms.RandomRotation(degrees=15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=8),
+            transforms.RandomPerspective(distortion_scale=0.15, p=0.3),
             # Color — brightness, contrast, saturation
-            transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25),
-            transforms.RandomGrayscale(p=0.1),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.02),
+            transforms.RandomGrayscale(p=0.05),
             # Blur — light, probabilistic
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.15),
             transforms.ToTensor(),
-            transforms.RandomErasing(p=0.25, scale=(0.02, 0.2)),
+            transforms.RandomErasing(p=0.15, scale=(0.02, 0.15)),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
@@ -158,7 +157,46 @@ def write_history_csv(history: list[dict[str, Any]], path: Path) -> None:
         writer.writerows(history)
 
 
+class _PathEncoder(json.JSONEncoder):
+    """JSON encoder that converts Path objects to strings."""
+
+    def default(self, o: Any) -> Any:
+        if isinstance(o, Path):
+            return str(o)
+        return super().default(o)
+
+
 def write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, indent=2, ensure_ascii=False, cls=_PathEncoder)
+
+
+def freeze_backbone(model: nn.Module) -> None:
+    """Freeze all layers except the final classifier head."""
+    for name, param in model.named_parameters():
+        if "classifier" not in name:
+            param.requires_grad = False
+
+
+def unfreeze_backbone(model: nn.Module) -> None:
+    """Unfreeze all layers."""
+    for param in model.parameters():
+        param.requires_grad = True
+
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    epochs: int,
+    warmup_epochs: int = 3,
+) -> torch.optim.lr_scheduler.SequentialLR:
+    """Cosine-annealing scheduler with linear warmup."""
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, total_iters=warmup_epochs,
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(epochs - warmup_epochs, 1),
+    )
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs],
+    )

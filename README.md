@@ -151,6 +151,8 @@ python -m scripts.train_mobilenet --dataset-root data/training/dataset_v1 --outp
 python -m scripts.train_mobilenet --dataset-root data/training/dataset_v1 --output-dir data/models/train_mobilenet_large --model mobilenet_v3_large --epochs 25 --batch-size 32 --lr 5e-4
 ```
 
+ImageNet-pretrained weights are used by default. Pass `--no-pretrained` to train from scratch (not recommended for small datasets).
+
 Outputs:
 
 - best checkpoint

@@ -21,8 +21,8 @@ def compute_split_targets(total_videos: int) -> dict[str, int]:
     if total_videos == 4:
         return {"train": 2, "val": 1, "test": 1}
 
-    val = max(2, int(round(total_videos * 0.15)))
-    test = max(2, int(round(total_videos * 0.15)))
+    val = max(2, int(round(total_videos * 0.05)))
+    test = max(2, int(round(total_videos * 0.05)))
     train = total_videos - val - test
 
     if train < 1:
@@ -64,9 +64,22 @@ def assign_splits(sessions: list[dict[str, Any]], seed: int = 42) -> list[dict[s
     assigned_count = {split: 0 for split in SPLITS}
     assigned_label_count = {split: Counter() for split in SPLITS}
 
-    sessions.sort(key=lambda s: (label_counts[s["label"]], s["label"], s["session_id"]))
+    # Round-robin interleave by class so that no single class monopolises
+    # the early split assignments.
+    by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for s in sessions:
+        by_label[s["label"]].append(s)
+    for label in by_label:
+        by_label[label].sort(key=lambda s: s["session_id"])
+    labels = sorted(by_label.keys())
+    ordered: list[dict[str, Any]] = []
+    max_per_label = max((len(v) for v in by_label.values()), default=0)
+    for i in range(max_per_label):
+        for label in labels:
+            if i < len(by_label[label]):
+                ordered.append(by_label[label][i])
 
-    for session in sessions:
+    for session in ordered:
         label = session["label"]
         best_split = None
         best_score = None
@@ -74,13 +87,16 @@ def assign_splits(sessions: list[dict[str, Any]], seed: int = 42) -> list[dict[s
             if assigned_count[split] >= targets[split]:
                 continue
 
-            size_term = ((assigned_count[split] + 1) - targets[split]) ** 2
+            # Use fill ratios (assigned / target) instead of absolute
+            # differences so that splits with larger targets (train) are
+            # not unfairly penalised compared to smaller ones (val/test).
+            size_ratio = (assigned_count[split] + 1) / max(targets[split], 1)
             desired = desired_per_label_split[label][split]
-            label_term = ((assigned_label_count[split][label] + 1) - desired) ** 2
+            label_ratio = (assigned_label_count[split][label] + 1) / max(desired, 1e-9)
 
             # Slightly prefer filling train first for rare classes.
-            train_bonus = -0.15 if split == "train" and assigned_label_count["train"][label] == 0 else 0.0
-            score = size_term * 2.0 + label_term + train_bonus
+            train_bonus = -0.01 if split == "train" and assigned_label_count["train"][label] == 0 else 0.0
+            score = size_ratio * 2.0 + label_ratio + train_bonus
 
             if best_score is None or score < best_score:
                 best_score = score
