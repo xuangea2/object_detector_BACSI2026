@@ -34,15 +34,20 @@ class CSVCropDataset(Dataset):
 def build_transforms(image_size: int = 224) -> tuple[transforms.Compose, transforms.Compose]:
     train_tfms = transforms.Compose(
         [
-            transforms.RandomResizedCrop(image_size, scale=(0.6, 1.0)),
+            # Geometry — aggressive rotations, flips, perspective
+            transforms.RandomResizedCrop(image_size, scale=(0.5, 1.0)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomVerticalFlip(p=0.3),
-            transforms.RandomRotation(degrees=45),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=15),
-            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=7, sigma=(1.0, 3.0))], p=0.3),
+            transforms.RandomRotation(degrees=180),
+            transforms.RandomAffine(degrees=0, translate=(0.15, 0.15), shear=20),
+            transforms.RandomPerspective(distortion_scale=0.3, p=0.4),
+            # Color — brightness, contrast, saturation
+            transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25),
+            transforms.RandomGrayscale(p=0.1),
+            # Blur — light, probabilistic
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
             transforms.ToTensor(),
-            transforms.RandomErasing(p=0.2, scale=(0.02, 0.15)),
+            transforms.RandomErasing(p=0.25, scale=(0.02, 0.2)),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
     )
