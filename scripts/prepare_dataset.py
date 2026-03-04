@@ -10,18 +10,34 @@ import mediapipe as mp
 import pandas as pd
 from tqdm import tqdm
 
-from hand_object_demo.io_utils import ensure_dir, list_videos, write_json, write_yaml
+from hand_object_demo.io_utils import (
+    ensure_dir,
+    list_videos,
+    next_versioned_dir,
+    overwrite_latest_versioned_dir,
+    write_json,
+    write_yaml,
+)
 from hand_object_demo.roi import crop_from_roi, compute_hand_object_roi, draw_hand_and_roi, landmarks_to_array
 from hand_object_demo.splitting import assign_splits, summarize_split
 
 
 mp_hands = mp.solutions.hands
 
+_TRAINING_ROOT = Path("data/training")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a hand-centered dataset from class-organized videos.")
     parser.add_argument("--input-root", type=Path, required=True, help="Root folder with one subfolder per class.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Output dataset folder.")
+    parser.add_argument(
+        "--output-root", type=Path, default=None,
+        help="Output dataset folder. Default: data/training/dataset_{next_version}.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", default=False,
+        help="Delete the latest dataset version and regenerate it instead of creating a new one.",
+    )
     parser.add_argument("--fps", type=float, default=1.0, help="Approximate number of crops saved per second of video.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for split assignment.")
     parser.add_argument("--min-detection-confidence", type=float, default=0.5)
@@ -140,7 +156,18 @@ def process_video(session: dict, args: argparse.Namespace, hands, paths: dict[st
 def main() -> None:
     args = parse_args()
     input_root = args.input_root.resolve()
-    output_root = args.output_root.resolve()
+
+    # Resolve auto-versioned output root
+    if args.output_root is not None:
+        output_root = args.output_root.resolve()
+    elif args.overwrite:
+        output_root = overwrite_latest_versioned_dir(_TRAINING_ROOT, "dataset").resolve()
+    else:
+        output_root = next_versioned_dir(_TRAINING_ROOT, "dataset").resolve()
+
+    print(f"Input root  : {input_root}")
+    print(f"Output root : {output_root}")
+    print()
 
     paths = {
         "images": ensure_dir(output_root / "images"),
