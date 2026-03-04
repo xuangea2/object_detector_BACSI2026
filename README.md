@@ -32,7 +32,9 @@ object_detector_BACSI2026/
 │   ├── prepare_dataset.py
 │   ├── preview_video_rois.py
 │   ├── train_mobilenet.py
-│   └── evaluate_classifier.py
+│   ├── export_model.py
+│   ├── evaluate_classifier.py
+│   └── jetson_inference.py
 └── hand_object_demo/
     ├── __init__.py
     ├── io_utils.py
@@ -208,12 +210,93 @@ Each run auto-creates its output in `data/models/train_{model}_{version}/`.
 
 - `best.pt` — best validation accuracy checkpoint
 - `last.pt` — last epoch checkpoint
+- `best.torchscript` — TorchScript traced model (auto-exported)
+- `best.onnx` — ONNX graph, opset 11 (auto-exported)
+- `class_names.json` — ordered class labels for inference
 - `history.csv` — per-epoch metrics
 - `training_config.json` — full config + class names
 
 ---
 
-## 4) Evaluate on test
+## 4) Export a trained model (standalone)
+
+If you already have a `.pt` checkpoint and want to (re-)export it to
+TorchScript / ONNX without retraining:
+
+```bash
+python -m scripts.export_model data/models/train_resnet50_3/best.pt
+```
+
+The exported files are saved next to the checkpoint. Use `--output-dir` to
+choose a different destination:
+
+```bash
+python -m scripts.export_model data/models/train_resnet50_3/best.pt \
+  --output-dir deploy/
+```
+
+### Exported formats
+
+| Format | File | Use case |
+|---|---|---|
+| **TorchScript** | `best.torchscript` | Load with `torch.jit.load()` on any PyTorch version (including Jetson Nano). No Python model code needed. |
+| **ONNX** | `best.onnx` | Load with `onnxruntime`, or convert to TensorRT on the Jetson for maximum inference speed. |
+| **Class names** | `class_names.json` | Maps output indices to category labels. |
+
+### Jetson Nano deployment
+
+The Jetson Nano (JetPack / Ubuntu 18.04 / Python 3.6) cannot run recent
+PyTorch directly.  Use the exported files instead:
+
+**Option A — TorchScript** (simplest):
+```python
+import torch
+model = torch.jit.load("best.torchscript")
+model.eval()
+output = model(input_tensor)        # [1, num_classes]
+predicted = output.argmax(dim=1)
+```
+
+**Option B — ONNX + onnxruntime**:
+```python
+import onnxruntime as ort
+session = ort.InferenceSession("best.onnx")
+output = session.run(None, {"input": img_numpy})[0]
+```
+
+**Option C — ONNX → TensorRT** (fastest on Jetson):
+```bash
+/usr/src/tensorrt/bin/trtexec --onnx=best.onnx --saveEngine=best.engine
+```
+
+### Inference test script
+
+`scripts/jetson_inference.py` is a self-contained script that works on the
+Jetson (Python ≥ 3.6) or on any machine.  It auto-detects the backend from
+the file extension:
+
+```bash
+# TorchScript
+python scripts/jetson_inference.py best.torchscript class_names.json images/
+
+# ONNX
+python scripts/jetson_inference.py best.onnx class_names.json images/
+
+# TensorRT engine
+python scripts/jetson_inference.py best.engine class_names.json images/
+
+# Single image, CPU-only
+python scripts/jetson_inference.py best.torchscript class_names.json photo.jpg --device cpu
+```
+
+Copy to the Jetson: `best.torchscript` (or `.onnx` / `.engine`),
+`class_names.json`, and `jetson_inference.py`.  Dependencies on the Jetson:
+`opencv-python`, `numpy`, and one of `torch` / `onnxruntime-gpu` /
+`tensorrt+pycuda` depending on the backend.
+
+---
+
+## 5) Evaluate on test
 
 ```bash
 python -m scripts.evaluate_classifier \

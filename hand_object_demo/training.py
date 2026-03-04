@@ -31,25 +31,121 @@ class CSVCropDataset(Dataset):
         return image, target
 
 
-def build_transforms(image_size: int = 224) -> tuple[transforms.Compose, transforms.Compose]:
-    train_tfms = transforms.Compose(
-        [
-            # Geometry — mild, realistic distortions only
-            transforms.RandomResizedCrop(image_size, scale=(0.7, 1.0)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), shear=8),
-            transforms.RandomPerspective(distortion_scale=0.15, p=0.3),
-            # Color — brightness, contrast, saturation
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.02),
-            transforms.RandomGrayscale(p=0.05),
-            # Blur — light, probabilistic
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.15),
-            transforms.ToTensor(),
-            transforms.RandomErasing(p=0.15, scale=(0.02, 0.15)),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
+# ── Default augmentation parameters ──────────────────────────────────────────
+# Collected in a dict so every value can be overridden from the CLI.
+
+DEFAULT_AUGMENT: dict[str, Any] = {
+    # Geometry
+    "crop_scale_lo": 0.8,
+    "crop_scale_hi": 1.0,
+    "hflip": 0.5,
+    "rotation": 180,
+    "translate": 0.1,
+    "shear": 8.0,
+    "perspective": 0.15,
+    "perspective_p": 0.3,
+    # Color
+    "brightness": 0.3,
+    "contrast": 0.3,
+    "saturation": 0.15,
+    "hue": 0.02,
+    "grayscale_p": 0.15,
+    "equalize_p": 0.1,
+    "autocontrast_p": 0.15,
+    "sharpness_factor": 2.0,
+    "sharpness_p": 0.2,
+    # Blur
+    "blur_sigma_lo": 0.1,
+    "blur_sigma_hi": 1.0,
+    "blur_p": 0.1,
+    # Erasing
+    "erasing_p": 0.15,
+    "erasing_scale_lo": 0.02,
+    "erasing_scale_hi": 0.15,
+}
+
+
+def build_transforms(
+    image_size: int = 224,
+    augment: dict[str, Any] | None = None,
+) -> tuple[transforms.Compose, transforms.Compose]:
+    """Build train and eval transform pipelines.
+
+    Parameters
+    ----------
+    image_size:
+        Spatial resolution (default 224).
+    augment:
+        Dict overriding any key in ``DEFAULT_AUGMENT``.  Pass ``None`` to
+        use the built-in defaults.  Keys with a probability of 0 disable
+        the corresponding transform entirely.
+    """
+    a = {**DEFAULT_AUGMENT, **(augment or {})}
+
+    train_layers: list = []
+
+    # ── Geometry ─────────────────────────────────────────────────────────
+    train_layers.append(
+        transforms.RandomResizedCrop(image_size, scale=(a["crop_scale_lo"], a["crop_scale_hi"]))
     )
+    if a["hflip"] > 0:
+        train_layers.append(transforms.RandomHorizontalFlip(p=a["hflip"]))
+    if a["rotation"] > 0:
+        train_layers.append(transforms.RandomRotation(degrees=a["rotation"]))
+    if a["translate"] > 0 or a["shear"] > 0:
+        train_layers.append(
+            transforms.RandomAffine(
+                degrees=0,
+                translate=(a["translate"], a["translate"]) if a["translate"] > 0 else None,
+                shear=a["shear"] if a["shear"] > 0 else None,
+            )
+        )
+    if a["perspective_p"] > 0:
+        train_layers.append(
+            transforms.RandomPerspective(distortion_scale=a["perspective"], p=a["perspective_p"])
+        )
+
+    # ── Color ────────────────────────────────────────────────────────────
+    if any(a[k] > 0 for k in ("brightness", "contrast", "saturation", "hue")):
+        train_layers.append(
+            transforms.ColorJitter(
+                brightness=a["brightness"],
+                contrast=a["contrast"],
+                saturation=a["saturation"],
+                hue=a["hue"],
+            )
+        )
+    if a["grayscale_p"] > 0:
+        train_layers.append(transforms.RandomGrayscale(p=a["grayscale_p"]))
+    if a["equalize_p"] > 0:
+        train_layers.append(transforms.RandomEqualize(p=a["equalize_p"]))
+    if a["autocontrast_p"] > 0:
+        train_layers.append(transforms.RandomAutocontrast(p=a["autocontrast_p"]))
+    if a["sharpness_p"] > 0:
+        train_layers.append(
+            transforms.RandomAdjustSharpness(sharpness_factor=a["sharpness_factor"], p=a["sharpness_p"])
+        )
+
+    # ── Blur ─────────────────────────────────────────────────────────────
+    if a["blur_p"] > 0:
+        train_layers.append(
+            transforms.RandomApply(
+                [transforms.GaussianBlur(kernel_size=3, sigma=(a["blur_sigma_lo"], a["blur_sigma_hi"]))],
+                p=a["blur_p"],
+            )
+        )
+
+    # ── Tensor conversion + post-tensor augmentations ────────────────────
+    train_layers.append(transforms.ToTensor())
+    if a["erasing_p"] > 0:
+        train_layers.append(
+            transforms.RandomErasing(p=a["erasing_p"], scale=(a["erasing_scale_lo"], a["erasing_scale_hi"]))
+        )
+    train_layers.append(
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    )
+
+    train_tfms = transforms.Compose(train_layers)
     eval_tfms = transforms.Compose(
         [
             transforms.Resize(int(image_size * 1.14)),
@@ -240,11 +336,70 @@ def set_head_dropout(model: nn.Module, p: float) -> None:
                 model.fc = nn.Sequential(*layers)
 
 
+def set_head_mlp(
+    model: nn.Module,
+    num_classes: int,
+    dropout: float = 0.4,
+    hidden_sizes: tuple[int, ...] = (256,),
+) -> None:
+    """Replace the single classification layer with a multi-layer MLP.
+
+    Call right after ``create_model`` (instead of ``set_head_dropout``).
+    The MLP provides more capacity for learning non-linear decision boundaries
+    when the backbone is kept frozen as a fixed feature extractor.
+
+    Parameters
+    ----------
+    hidden_sizes:
+        Sizes of hidden layers.  Default ``(256,)`` gives a single hidden
+        layer;  ``(256, 128)`` gives the original two-hidden-layer design.
+    """
+    def _mlp(in_f: int) -> nn.Sequential:
+        layers: list[nn.Module] = []
+        prev = in_f
+        for h in hidden_sizes:
+            layers += [nn.Linear(prev, h), nn.BatchNorm1d(h), nn.ReLU(), nn.Dropout(dropout)]
+            prev = h
+        layers.append(nn.Linear(prev, num_classes))
+        return nn.Sequential(*layers)
+
+    # --- Sequential classifier (MobileNet, EfficientNet, ConvNeXt, SqueezeNet) ---
+    if hasattr(model, "classifier") and isinstance(model.classifier, nn.Sequential):
+        for i in range(len(model.classifier) - 1, -1, -1):
+            layer = model.classifier[i]
+            if isinstance(layer, nn.Linear):
+                model.classifier[i] = _mlp(layer.in_features)
+                return
+            if isinstance(layer, nn.Conv2d):
+                # SqueezeNet: replace Conv2d onward with pool → flatten → MLP
+                pre = list(model.classifier.children())[:i]
+                model.classifier = nn.Sequential(
+                    *pre,
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Flatten(),
+                    *list(_mlp(layer.in_channels).children()),
+                )
+                return
+
+    # --- Direct fc attribute (ResNet, ShuffleNet) ---
+    if hasattr(model, "fc"):
+        fc = model.fc
+        if isinstance(fc, nn.Linear):
+            model.fc = _mlp(fc.in_features)
+            return
+        if isinstance(fc, nn.Sequential):
+            for layer in fc:
+                if isinstance(layer, nn.Linear):
+                    model.fc = _mlp(layer.in_features)
+                    return
+
+
 def build_dataloaders(
     dataset_root: Path,
     batch_size: int,
     num_workers: int,
     image_size: int,
+    augment: dict[str, Any] | None = None,
 ) -> tuple[dict[str, CSVCropDataset], dict[str, DataLoader], list[str]]:
     samples_csv = dataset_root / "metadata" / "samples.csv"
     if not samples_csv.exists():
@@ -257,7 +412,7 @@ def build_dataloaders(
     class_names = sorted(df["label"].unique().tolist())
     class_to_idx = {name: idx for idx, name in enumerate(class_names)}
 
-    train_tfms, eval_tfms = build_transforms(image_size=image_size)
+    train_tfms, eval_tfms = build_transforms(image_size=image_size, augment=augment)
     datasets_map = {}
     for split, tfm in [("train", train_tfms), ("val", eval_tfms), ("test", eval_tfms)]:
         split_rows = df[df["split"] == split].to_dict(orient="records")
@@ -381,6 +536,143 @@ def unfreeze_backbone(model: nn.Module) -> None:
     """Unfreeze all layers."""
     for param in model.parameters():
         param.requires_grad = True
+
+
+def get_param_groups(
+    model: nn.Module,
+    lr: float,
+    backbone_lr_factor: float = 0.1,
+    weight_decay: float = 5e-4,
+) -> list[dict[str, Any]]:
+    """Create optimizer parameter groups with discriminative learning rates.
+
+    Assigns ``lr * backbone_lr_factor`` to backbone parameters and ``lr``
+    to the classification head.  This prevents the pre-trained backbone from
+    changing too rapidly after unfreezing — the primary cause of overfitting
+    in fine-tuning scenarios.
+
+    Typical workflow::
+
+        # Phase 1: head-only (backbone frozen)
+        freeze_backbone(model)
+        optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=lr)
+
+        # Phase 2: full model with discriminative LR
+        unfreeze_backbone(model)
+        groups = get_param_groups(model, lr=3e-4, backbone_lr_factor=0.1)
+        optimizer = AdamW(groups)  # backbone -> 3e-5, head -> 3e-4
+    """
+    head_names = {"classifier", "fc"}
+    backbone_params: list[torch.Tensor] = []
+    head_params: list[torch.Tensor] = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        top_level = name.split(".")[0]
+        if top_level in head_names:
+            head_params.append(param)
+        else:
+            backbone_params.append(param)
+
+    groups: list[dict[str, Any]] = []
+    if backbone_params:
+        groups.append({
+            "params": backbone_params,
+            "lr": lr * backbone_lr_factor,
+            "weight_decay": weight_decay,
+        })
+    if head_params:
+        groups.append({
+            "params": head_params,
+            "lr": lr,
+            "weight_decay": weight_decay,
+        })
+    return groups
+
+
+def export_model(
+    model: nn.Module,
+    class_names: list[str],
+    output_dir: Path,
+    image_size: int = 224,
+    prefix: str = "best",
+) -> dict[str, Path]:
+    """Export a trained model to TorchScript and ONNX for deployment.
+
+    Produces three files inside *output_dir*:
+
+    - ``{prefix}.torchscript`` – TorchScript traced model (PyTorch-native,
+      works across PyTorch versions).
+    - ``{prefix}.onnx`` – ONNX graph (opset 11, compatible with TensorRT /
+      onnxruntime on Jetson Nano and similar edge devices).
+    - ``class_names.json`` – ordered list of class labels so the inference
+      script can map argmax indices back to category names.
+
+    Parameters
+    ----------
+    model:
+        A trained ``nn.Module`` already in eval mode and on CPU.
+    class_names:
+        Ordered list of class labels (index 0 → first name, etc.).
+    output_dir:
+        Destination folder (created if needed).
+    image_size:
+        Spatial size used during training (default 224).
+    prefix:
+        Filename stem for the exported artefacts.
+
+    Returns
+    -------
+    dict mapping format name to the written path.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model.eval()
+    model.cpu()
+
+    dummy = torch.randn(1, 3, image_size, image_size)
+    paths: dict[str, Path] = {}
+
+    # --- TorchScript (traced) ---
+    ts_path = output_dir / f"{prefix}.torchscript"
+    try:
+        traced = torch.jit.trace(model, dummy)
+        traced.save(str(ts_path))
+        paths["torchscript"] = ts_path
+        print(f"  ✔ TorchScript : {ts_path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ✘ TorchScript export failed: {exc}")
+
+    # --- ONNX (opset 11 for broad Jetson / TensorRT compatibility) ---
+    onnx_path = output_dir / f"{prefix}.onnx"
+    try:
+        torch.onnx.export(
+            model,
+            dummy,
+            str(onnx_path),
+            opset_version=11,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={
+                "input": {0: "batch"},
+                "output": {0: "batch"},
+            },
+            dynamo=False,  # legacy exporter → clean opset 11
+        )
+        paths["onnx"] = onnx_path
+        print(f"  ✔ ONNX        : {onnx_path}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ✘ ONNX export failed: {exc}")
+
+    # --- Class-name mapping ---
+    names_path = output_dir / "class_names.json"
+    with names_path.open("w", encoding="utf-8") as f:
+        json.dump(class_names, f, indent=2, ensure_ascii=False)
+    paths["class_names"] = names_path
+    print(f"  ✔ Class names  : {names_path}")
+
+    return paths
 
 
 def build_scheduler(

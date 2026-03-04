@@ -7,4 +7,5 @@ PyYAML>=6.0.0
 Pillow>=10.0.0
 torch>=2.2.0
 torchvision>=0.17.0
+onnx>=1.14.0
 scikit-learn>=1.4.0
