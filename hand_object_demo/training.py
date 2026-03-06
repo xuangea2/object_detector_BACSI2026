@@ -600,10 +600,12 @@ def export_model(
 ) -> dict[str, Path]:
     """Export a trained model to TorchScript and ONNX for deployment.
 
-    Produces three files inside *output_dir*:
+    Produces four files inside *output_dir*:
 
     - ``{prefix}.torchscript`` – TorchScript traced model (PyTorch-native,
       works across PyTorch versions).
+    - ``{prefix}_torch110.torchscript`` – TorchScript model re-saved with
+      legacy serialisation format compatible with PyTorch 1.10 (Jetson Nano).
     - ``{prefix}.onnx`` – ONNX graph (opset 11, compatible with TensorRT /
       onnxruntime on Jetson Nano and similar edge devices).
     - ``class_names.json`` – ordered list of class labels so the inference
@@ -643,6 +645,23 @@ def export_model(
         print(f"  ✔ TorchScript : {ts_path}")
     except Exception as exc:  # noqa: BLE001
         print(f"  ✘ TorchScript export failed: {exc}")
+
+    # --- TorchScript compatible with PyTorch 1.10 (Jetson Nano) ---
+    ts110_path = output_dir / f"{prefix}_torch110.torchscript"
+    try:
+        if "torchscript" in paths:
+            # Re-load the freshly-saved model and re-save it; torch.jit.save
+            # without _use_new_zipfile_serialization produces the legacy
+            # format (file-format version ≤ 6) that PyTorch 1.10 can read.
+            ts_model = torch.jit.load(str(ts_path), map_location="cpu")
+            ts_model.eval()
+            torch.jit.save(ts_model, str(ts110_path), _extra_files={})
+            paths["torchscript_torch110"] = ts110_path
+            print(f"  ✔ TorchScript (torch110) : {ts110_path}")
+        else:
+            print("  ⊘ TorchScript (torch110) : skipped (base export failed)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ✘ TorchScript (torch110) export failed: {exc}")
 
     # --- ONNX (opset 11 for broad Jetson / TensorRT compatibility) ---
     onnx_path = output_dir / f"{prefix}.onnx"
